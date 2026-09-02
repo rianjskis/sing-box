@@ -7,21 +7,17 @@ jobs:
   build:
     name: Build (${{ matrix.target.goarch }})
     runs-on: ubuntu-24.04
+
     strategy:
       fail-fast: false
       matrix:
         target:
           - goarch: arm64
             compiler: aarch64-linux-android35-clang
-          - goarch: arm
-            goarm: "7"
-            compiler: armv7a-linux-androideabi35-clang
-          - goarch: amd64
-            compiler: x86_64-linux-android35-clang
-          - goarch: "386"
-            compiler: i686-linux-android35-clang
+
     env:
       BASE_TAGS: with_gvisor,with_quic,with_dhcp,with_utls,with_clash_api,with_ebpf,badlinkname,tfogo_checklinkname0
+
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -33,13 +29,17 @@ jobs:
         with:
           go-version: 1.26.6
 
+      # ============================================================
+      # Android arm64 + eBPF
+      # ============================================================
+
       - name: Setup Android NDK
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r29
 
-      - name: Build
+      - name: Build Android eBPF
         env:
           CGO_ENABLED: "1"
           GOOS: android
@@ -48,12 +48,67 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           CC: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.target.compiler }}
         run: |
+          set -euo pipefail
+
           export TAGS="$BASE_TAGS"
+
           make ebpf_generate
           make build
 
-      - name: Upload
+          mv sing-box "sing-box-android-${{ matrix.target.goarch }}-with-ebpf"
+
+      - name: Upload Android
         uses: actions/upload-artifact@v7
         with:
           name: sing-box-android-${{ matrix.target.goarch }}-with-ebpf
-          path: sing-box
+          path: sing-box-android-${{ matrix.target.goarch }}-with-ebpf
+
+      # ============================================================
+      # Linux arm64 + musl + NaiveProxy + eBPF
+      # ============================================================
+
+      - name: Clone cronet-go
+        run: |
+          set -euo pipefail
+
+          git clone --recursive --depth=1 \
+            https://github.com/SagerNet/cronet-go.git \
+            cronet-go
+
+      - name: Prepare cronet-go toolchain (linux arm64 musl)
+        run: |
+          set -euo pipefail
+
+          cd cronet-go
+
+          go run ./cmd/build-naive \
+            --target=linux/arm64 \
+            --libc=musl \
+            download-toolchain
+
+          go run ./cmd/build-naive \
+            --target=linux/arm64 \
+            --libc=musl \
+            env >> "$GITHUB_ENV"
+
+      - name: Build Linux arm64 musl Naive
+        env:
+          CGO_ENABLED: "1"
+          GOOS: linux
+          GOARCH: arm64
+        run: |
+          set -euo pipefail
+
+          export TAGS="with_quic with_dhcp with_utls with_acme with_clash_api with_gvisor with_ebpf with_naive_outbound with_musl badlinkname tfogo_checklinkname0"
+
+          go build -v -trimpath \
+            -tags "$TAGS" \
+            -ldflags "-checklinkname=0 -X 'internal/godebug.defaultGODEBUG=multipathtcp=0' -s -w -buildid=" \
+            -o sing-box-linux-arm64-musl \
+            ./cmd/sing-box
+
+      - name: Upload Linux arm64 musl Naive
+        uses: actions/upload-artifact@v7
+        with:
+          name: sing-box-linux-arm64-musl-naive
+          path: sing-box-linux-arm64-musl
